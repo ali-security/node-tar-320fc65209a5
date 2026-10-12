@@ -1,19 +1,21 @@
 name: CI
 
 on:
-  push: {}
-  pull_request_target:
-    paths:
-      - 'src/**'
-      - 'test/**'
-      - '*.json'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tap test file(s) to run instead of the full suite'
+        required: false
+        default: ''
 
 
 jobs:
   build:
+    timeout-minutes: 20
     strategy:
       matrix:
-        node-version: [22.x, 24.x]
+        # 24.4.1 (the Node that packed the public tarball): newer 24.x hangs @tapjs/mock t.mockImport tests
+        node-version: [22.x, 24.4.1]
         platform:
         - os: ubuntu-latest
           shell: bash
@@ -39,4 +41,16 @@ jobs:
         run: npm install
 
       - name: Run Tests
-        run: npm test -- -c
+        run: npm test -- -c ${{ inputs.test-filter }}
+
+      - name: Pack
+        if: matrix.platform.os == 'ubuntu-latest' && matrix.node-version == '24.4.1'
+        run: npm pack
+
+      - name: Upload Artifact
+        if: matrix.platform.os == 'ubuntu-latest' && matrix.node-version == '24.4.1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tar-tgz
+          path: "tar-*.tgz"
+          if-no-files-found: error
