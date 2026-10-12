@@ -1085,3 +1085,162 @@ t.test('tarmageddon', t => {
 
   t.end()
 })
+
+t.test('max decompression ratio', async t => {
+  const makeCompressedBomb = () => {
+    const payload = Buffer.alloc(8 * 1024 * 1024)
+    return zlib.gzipSync(
+      makeTar([
+        {
+          path: 'bomb',
+          size: payload.length,
+          type: 'File',
+        },
+        payload,
+        '',
+        '',
+      ]),
+    )
+  }
+  const bomb = makeCompressedBomb()
+
+  t.test('parsing aborts by default', async t => {
+    const p = new Parser({})
+    t.throws(
+      () => p.end(bomb),
+      {
+        tarCode: 'TAR_ABORT',
+        recoverable: false,
+        message: /max decompression ratio exceeded/,
+      },
+      'parsing aborts',
+    )
+    // no-op to abort again
+    p.abort(new Error('hello'))
+  })
+
+  t.test('aborting only happens one time', t => {
+    const p = new Parser({})
+    t.throws(() => p.abort(new Error('hello')), {
+      message: 'hello',
+      tarCode: 'TAR_ABORT',
+      recoverable: false,
+    })
+    // this is ignored
+    p.end(bomb)
+    t.end()
+  })
+
+  t.test('parsing can disable the limit explicitly', async () => {
+    let bytesRead = 0
+    await new Promise(res =>
+      new Parser({
+        maxDecompressionRatio: Infinity,
+        onReadEntry(e) {
+          e.on('data', c => (bytesRead += c.byteLength))
+        },
+      })
+        .on('end', res)
+        .end(bomb)
+        .resume(),
+    )
+    t.equal(bytesRead, 8 * 1024 * 1024)
+  })
+
+  t.end()
+})
+
+t.test('max decompression ratio, other codecs and stream paths', t => {
+  const payload = Buffer.alloc(8 * 1024 * 1024)
+  const raw = makeTar([
+    {
+      path: 'bomb',
+      size: payload.length,
+      type: 'File',
+    },
+    payload,
+    '',
+    '',
+  ])
+  const gz = zlib.gzipSync(raw)
+  const ratioAbort = {
+    tarCode: 'TAR_ABORT',
+    recoverable: false,
+    message: /max decompression ratio exceeded/,
+  }
+
+  t.test('brotli bomb aborts by default', t => {
+    const p = new Parser({ brotli: {} })
+    t.throws(() => p.end(zlib.brotliCompressSync(raw)), ratioAbort)
+    t.end()
+  })
+
+  t.test('brotli bomb detected from .tbr filename aborts', t => {
+    const p = new Parser({ file: 'bomb.tbr' })
+    t.throws(() => p.end(zlib.brotliCompressSync(raw)), ratioAbort)
+    t.end()
+  })
+
+  t.test('zstd bomb aborts by default', t => {
+    const p = new Parser({})
+    t.throws(() => p.end(zlib.zstdCompressSync(raw)), ratioAbort)
+    t.end()
+  })
+
+  t.test('gzip bomb written in small chunks aborts', t => {
+    const errors = []
+    const aborts = []
+    const p = new Parser({})
+    p.on('error', er => errors.push(er))
+    p.on('abort', er => aborts.push(er))
+    for (let i = 0; i < gz.length; i += 512) {
+      p.write(gz.subarray(i, i + 512))
+    }
+    p.end()
+    t.equal(aborts.length, 1, 'aborted exactly once')
+    t.equal(errors.length, 1, 'one error reported')
+    t.match(errors[0], ratioAbort)
+    t.end()
+  })
+
+  t.test('truncated gzip bomb reports only the ratio error', t => {
+    const errors = []
+    const p = new Parser({})
+    p.on('error', er => errors.push(er))
+    // drop the gzip trailer so the decompressor also errors at the end
+    p.end(gz.subarray(0, gz.length - 8))
+    t.equal(errors.length, 1, 'zlib error after abort is ignored')
+    t.match(errors[0], ratioAbort)
+    t.end()
+  })
+
+  t.test('custom lower limit is enforced', t => {
+    const small = zlib.gzipSync(
+      makeTar([
+        {
+          path: 'zeros',
+          size: 64 * 1024,
+          type: 'File',
+        },
+        Buffer.alloc(64 * 1024),
+        '',
+        '',
+      ]),
+    )
+    t.throws(
+      () => new Parser({ maxDecompressionRatio: 10 }).end(small),
+      ratioAbort,
+    )
+    let bytesRead = 0
+    const p = new Parser({
+      onReadEntry(e) {
+        e.on('data', c => (bytesRead += c.byteLength))
+      },
+    })
+    p.end(small)
+    t.equal(bytesRead, 64 * 1024, 'default limit allows normal archive')
+    t.end()
+  })
+
+  t.end()
+})
